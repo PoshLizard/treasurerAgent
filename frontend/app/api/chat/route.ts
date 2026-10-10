@@ -3,7 +3,8 @@ export async function POST(request: Request) {
     const response = await fetch(`${process.env.BACKEND_URL}/chat`, {
         method: "POST",
         headers: {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "X-API-Key": process.env.API_SECRET || ""
         },
         body: JSON.stringify(body)
     });
