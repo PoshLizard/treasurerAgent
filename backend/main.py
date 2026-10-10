@@ -1,13 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from langchain_google_genai.chat_models import GoogleAPIError
-from pydantic import BaseModel
 from agent import agent, Answer
 from schemas import ChatRequest
 
 app = FastAPI()
-
-class ChatRequest(BaseModel):
-    message: str
 
 @app.get("/health")
 def health():

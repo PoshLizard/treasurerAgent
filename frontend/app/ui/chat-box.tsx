@@ -23,7 +23,7 @@ export default function ChatBox() {
       });
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.error || "Failed to fetch answer");
+        throw new Error(data.detail || "Failed to fetch answer");
       }
       setAnswer(data);
     } catch (error) {

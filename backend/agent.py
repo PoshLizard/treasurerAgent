@@ -7,7 +7,7 @@ from schemas import Answer
 load_dotenv()
 
 currentModel = ChatGoogleGenerativeAI(
-    model="gemini-3.6-flash",
+    model="gemini-3.5-flash",
     temperature=1.0,
     max_tokens=None,
     timeout=None,
