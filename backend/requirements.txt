@@ -1,6 +1,6 @@
-langchain
-langchain-community
-langchain-google-genai
-python-dotenv
-pydantic
-fastapi[standard]
+langchain==1.4.3
+langchain-community==0.4.2
+langchain-google-genai==4.4.0
+python-dotenv==1.2.4
+pydantic==2.13.5
+fastapi[standard]==0.143.0
