@@ -1,7 +1,25 @@
 "use client";
 import { useState } from "react";
 
-type Answer = { summary: string; sources: string[] };
+type Link = { label: string; url: string };
+type Answer = { summary: string; action_links?: Link[]; sources: string[] };
+
+// URLs come from model output, so only make http(s) links clickable (never javascript: etc.)
+const isWebUrl = (url: string) => /^https?:\/\//i.test(url);
+
+function ExternalLink({ url, label }: { url: string; label?: string }) {
+  if (!isWebUrl(url)) return <span>{label ?? url}</span>;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-600 underline break-all"
+    >
+      {label ?? url}
+    </a>
+  );
+}
 
 export default function ChatBox() {
   const [answer, setAnswer] = useState<Answer | null>(null);
@@ -61,13 +79,28 @@ export default function ChatBox() {
       {error && <p className="text-red-500">{error}</p>}
       {answer && (
         <div className="mt-4 p-4 rounded-lg">
-          <p>{answer.summary}</p>
+          <p className="whitespace-pre-line">{answer.summary}</p>
+          {/* Checked first so an older backend without action_links doesn't crash the page mid-deploy */}
+          {answer.action_links && answer.action_links.length > 0 && (
+            <div className="mt-4">
+              <p className="font-bold">Next steps:</p>
+              <ul className="list-disc pl-5">
+                {answer.action_links.map((link, index) => (
+                  <li key={index}>
+                    <ExternalLink url={link.url} label={link.label} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {answer.sources.length > 0 && (
-            <div className="mt-2">
+            <div className="mt-4">
               <p className="font-bold">Sources:</p>
-              <ul>
+              <ul className="list-disc pl-5">
                 {answer.sources.map((source, index) => (
-                  <li key={index}>{source}</li>
+                  <li key={index}>
+                    <ExternalLink url={source} />
+                  </li>
                 ))}
               </ul>
             </div>

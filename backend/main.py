@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from langchain_google_genai.chat_models import GoogleAPIError
-from agent import agent, Answer
-from schemas import ChatRequest
+from agent import run_agent
+from schemas import Answer, ChatRequest
 import os
 import secrets
 
@@ -20,12 +20,9 @@ def health():
 @app.post("/chat", dependencies=[Depends(require_api_secret)])
 def chat(request: ChatRequest) -> Answer:
     try:
-        result = agent.invoke(
-            {"messages": [{"role": "user", "content": request.message}]}
-        )
+        return run_agent(request.message)
     except GoogleAPIError:
         raise HTTPException(status_code=503, detail="The AI model is busy right now. Try again in a minute.")
-    return result["structured_response"]
 
 
 
