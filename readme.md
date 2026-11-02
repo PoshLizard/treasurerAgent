@@ -2,7 +2,7 @@
 
 An AI agent that automates the repetitive parts of being a university student organization treasurer. It researches fundraising and conference funding, answers questions about registered student organization (RSO) policies, turns receipt photos into reimbursement-ready expense records, and fills out university funding forms. A human approves anything that gets submitted.
 
-> **Status:** In active development. The core agent and a deployed end-to-end skeleton (Next.js frontend → FastAPI backend → LangChain agent) are working in a password-protected dev environment. Production launch is in progress, then receipt processing. See the [roadmap](#roadmap).
+> **Status:** In active development. The core agent and a deployed end-to-end skeleton (Next.js frontend → FastAPI backend → LangChain agent) are working in a password-protected dev environment. Receipt processing is in progress. See the [roadmap](#roadmap).
 
 ## Why I'm building this
 
@@ -15,7 +15,7 @@ As a student organization treasurer, I spend a lot of time on repetitive work: r
 | **Chat with the agent** | A Next.js chat page sends questions through a server-side proxy to a FastAPI backend, which runs the agent and returns a structured answer | Working (dev) |
 | **Funding research** | Finds fundraising ideas and conference funding (travel grants, sponsorships) using Firecrawl web search and scraping, and cites its sources | Prototype (placeholder tool) |
 | **Policy Q&A** | Answers questions about RSO funding rules using retrieval-augmented generation (RAG) over the university's policy documents | Planned |
-| **Receipt processing** | Reads receipt photos with Gemini's image understanding, interprets cryptic item codes, checks the totals, and records each expense | Planned |
+| **Receipt processing** | Reads receipt photos with Gemini's image understanding, checks the totals in Python, flags anything that needs review, and saves each receipt with its original photo. Approving receipts and interpreting cryptic item codes are next | In progress |
 | **Human review** | When it's unsure (an unreadable item code, a possible policy violation), the agent messages me on Telegram, waits for my answer, then continues | Planned |
 | **Form filling** | Fills out funding and reimbursement forms on Student Central with Playwright; I review and submit | Planned |
 | **Live agent view** | Streams the agent's steps and tool calls to the web app in real time | Planned |
@@ -37,6 +37,7 @@ flowchart LR
 
     Route -- "X-API-Key header" --> API
     Agent --> Gemini["Gemini API"]
+    API --> Supabase[("Supabase<br/>receipts + photos")]
 ```
 
 1. **Login:** `proxy.ts` runs before every request to the frontend and requires a username and password (HTTP Basic Auth).
@@ -89,7 +90,6 @@ flowchart LR
 |---|---|---|---|
 | `research_web` | Search and scrape trusted sources with Firecrawl | No | Placeholder |
 | `search_policies` | Retrieve relevant RSO policy passages | No | Planned |
-| `parse_receipt` | Extract structured line items from a receipt image | No | Planned |
 | `lookup_item_code` | Search the web to identify an unrecognized item code | No | Planned |
 | `ask_treasurer` | Message me on Telegram and wait for a reply | n/a | Planned |
 | `record_expense` | Save a validated expense | No | Planned |
@@ -103,15 +103,19 @@ flowchart LR
 2. **The app degrades gracefully when the model is unavailable.** If the main Gemini model fails, LangChain's `ModelFallbackMiddleware` retries with a lighter model. If Gemini is still unavailable, the API returns a 503 ("try again") rather than a generic 500, and the UI shows that message.
 3. **Output is structured and grounded.** The agent returns a Pydantic schema, not free text. Field descriptions tell the model to cite only URLs that came from tool results and to return an empty list otherwise, which prevents invented sources.
 4. **Deploys are reproducible.** Python dependencies are pinned, changes go through pull requests, and every merge deploys automatically to its environment.
+5. **Math is done in code, not by the model.** The LLM only copies what's printed, and Python checks that the items, tax, tip and total add up. A mismatch flags the receipt for human review. Amounts use `Decimal`, because floats can't represent most cents exactly.
+6. **Receipt extraction is a pipeline, not an agent tool.** Every receipt goes through the same steps, so there's nothing for an agent to decide, and a tool couldn't receive the image anyway because tool arguments are text the model writes. Extraction has no tools, so text printed on a receipt can't trigger an action.
+7. **Unreadable beats invented.** Receipt fields can be null, because a required field pressures the model to make up a value. A null is flagged for review, while a confident guess might not be noticed.
+8. **Only the backend can reach stored receipts.** The photo bucket is private and the Supabase secret key exists only on the backend. Row level security with no policies also blocks the tables from Supabase's public APIs.
+9. **Duplicates are flagged, not blocked.** A receipt matching a saved store, date and total gets a warning, so one purchase can't be reimbursed twice by accident, while two real identical purchases can still be saved.
 
 ### Planned
 
-5. **A person approves every submission.** The agent can prepare forms, but LangChain's human-in-the-loop middleware pauses before `submit_form_job`, and I make the final click on Student Central myself.
-6. **University credentials never touch the app.** Student Central uses single sign-on with multi-factor authentication. Instead of storing a password, the Playwright worker reuses a browser profile I logged into myself, and it only runs on my machine.
-7. **Math is done in code, not by the model.** The LLM extracts line items, and Python checks that the items, tax and total add up. A mismatch sends the receipt to human review.
-8. **Web content can't trigger actions.** Crawled pages can contain text written to manipulate an LLM (prompt injection). Research results are treated only as information, and every tool that submits anything requires approval.
-9. **Answers are cited and actions are logged.** Every agent run is traced in LangSmith, and every expense links back to its original receipt.
-10. **Personal data is minimized.** Receipts can include names and partial card numbers. These are redacted with LangChain's PII middleware before anything is stored or logged.
+10. **A person approves every submission.** The agent can prepare forms, but LangChain's human-in-the-loop middleware pauses before `submit_form_job`, and I make the final click on Student Central myself.
+11. **University credentials never touch the app.** Student Central uses single sign-on with multi-factor authentication. Instead of storing a password, the Playwright worker reuses a browser profile I logged into myself, and it only runs on my machine.
+12. **Web content can't trigger actions.** Crawled pages can contain text written to manipulate an LLM (prompt injection). Research results are treated only as information, and every tool that submits anything requires approval.
+13. **Answers are cited and actions are logged.** Every agent run is traced in LangSmith, and every expense links back to its original receipt.
+14. **Personal data is minimized.** Receipt extraction already skips names and card numbers. Real receipts stay out of this public repo, and anything else sensitive is redacted with LangChain's PII middleware before it's stored or logged.
 
 ## Tech stack
 
@@ -125,7 +129,8 @@ flowchart LR
 | Hosting | Vercel (frontend), Render (backend) | In use |
 | Web research | Firecrawl | Planned |
 | Browser automation | Playwright (Python) | Planned |
-| Database | PostgreSQL + pgvector (Supabase) | Planned |
+| Database and file storage | PostgreSQL and Storage (Supabase) | In use |
+| Vector search | pgvector | Planned |
 | Messaging | Telegram Bot API | Planned |
 | Observability | LangSmith | Planned |
 
@@ -139,10 +144,19 @@ flowchart LR
   - [x] Basic Auth login and a shared API secret between frontend and backend
   - [x] Pinned Python dependencies
   - [ ] Production environment deployed from `main`
-- [ ] **Phase 1: Receipt processing.** Receipt image to validated line items, item-code interpretation, confidence flags, and an evaluation set of real receipts.
+- [ ] **Phase 1: Receipt processing.** Photo in, items checked and decoded, approved by me, saved with the original image, and exportable.
+  - [x] Extract line items from a photo, with model fallback
+  - [x] Math and readability checks in Python, with unit tests
+  - [x] Upload page that shrinks photos in the browser
+  - [x] Evaluation tool, tested on synthetic receipts
+  - [ ] Evaluation set of real receipts
+  - [x] PostgreSQL and file storage for receipts, with duplicate detection
+  - [ ] Review screen to correct and approve a receipt
+  - [ ] Item-code interpretation
+  - [ ] CSV export
 - [ ] **Phase 2: Policy RAG.** Load RSO policies into pgvector, answer questions with citations, and check expenses against policy.
 - [ ] **Phase 3: Funding research.** Firecrawl research for fundraising and conference funding, with cited sources.
-- [ ] **Phase 4: Live agent view and storage.** Stream agent steps to the UI with Server-Sent Events, PostgreSQL storage, and LangSmith tracing.
+- [ ] **Phase 4: Live agent view.** Stream agent steps to the UI with Server-Sent Events, and add LangSmith tracing.
 - [ ] **Phase 5: Human in the loop.** Telegram bot for sending receipt photos and answering the agent's questions; runs pause and resume across conversations.
 - [ ] **Phase 6: Student Central forms.** A local Playwright worker fills forms from approved jobs.
 - [ ] **Phase 7: Evaluate and harden.** Accuracy evaluations, cost and rate limits, and real user accounts if other officers use the app.
@@ -161,7 +175,7 @@ Each environment gets its configuration from environment variables, so the same 
 
 ## Getting started
 
-**Prerequisites:** Python 3.13, Node.js 24, and a Gemini API key from [Google AI Studio](https://aistudio.google.com).
+**Prerequisites:** Python 3.13, Node.js 24, a Gemini API key from [Google AI Studio](https://aistudio.google.com), and a [Supabase](https://supabase.com) project with a private `receipts` bucket. Run [backend/schema.sql](backend/schema.sql) in its SQL Editor to create the tables.
 
 **1. Backend**
 
@@ -193,27 +207,52 @@ npm run dev
 
 Open http://localhost:3000 and log in with your `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`.
 
+**3. Tests and evaluations**
+
+```bash
+python -m pip install -r backend/requirements-dev.txt
+cd backend
+pytest                                    # unit tests, no API key needed
+cd ..
+python evals/run_receipts.py evals/synthetic   # fake receipts, calls Gemini
+python evals/run_receipts.py                   # your labeled receipts in evals/receipts/
+```
+
+`evals/receipts/` is gitignored. Never commit real receipts: they hold personal data and this repo is public.
+
 ## Project structure
 
 ```
 treasurerAgent/
 ├── backend/
-│   ├── main.py              # FastAPI app: /health and /chat (API key required)
+│   ├── main.py              # FastAPI app: /health, /chat and /receipts (API key required)
+│   ├── schema.sql           # database tables
 │   ├── agent.py             # LangChain agent: model, tools, fallback middleware
 │   ├── tools.py             # agent tools
+│   ├── receipts.py          # reads a receipt image into structured data
+│   ├── receipt_checks.py    # math and readability checks (no model, no API key)
+│   ├── receipt_store.py     # saves receipts to Supabase and flags duplicates
 │   ├── schemas.py           # Pydantic request and response schemas
-│   └── requirements.txt     # pinned Python dependencies
+│   ├── tests/               # unit tests
+│   ├── requirements.txt     # pinned Python dependencies
+│   └── requirements-dev.txt # adds test dependencies
 ├── frontend/
 │   ├── app/page.tsx         # chat page (Server Component)
+│   ├── app/receipts/page.tsx  # receipt upload page
 │   ├── app/ui/chat-box.tsx  # chat UI (Client Component)
+│   ├── app/ui/receipt-upload.tsx  # shrinks photos, uploads them, shows the result
 │   ├── app/api/chat/route.ts  # server-side proxy to the backend
+│   ├── app/api/receipts/route.ts  # server-side proxy for receipt uploads
 │   └── proxy.ts             # Basic Auth login check
+├── evals/
+│   ├── run_receipts.py      # scores extraction against labeled receipts
+│   └── synthetic/           # fake receipts that are safe to commit
 ├── .env.example             # backend environment variables
 ├── LEARNING.md              # build log
 └── readme.md
 ```
 
-Planned additions: `worker/` (Playwright form filling, runs locally) and `evals/` (test receipts with expected results).
+Planned addition: `worker/` (Playwright form filling, runs locally).
 
 ## Build log
 

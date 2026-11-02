@@ -1,0 +1,13 @@
+{
+  "merchant": "PARTY SUPPLY CO",
+  "purchase_date": "2026-10-21",
+  "items": [
+    {"raw_text": "BALLOONS 50CT", "item_code": null, "quantity": "1", "unit_price": null, "line_total": "8.99"},
+    {"raw_text": "STREAMERS", "item_code": null, "quantity": "1", "unit_price": null, "line_total": "4.50"},
+    {"raw_text": "COUPON", "item_code": null, "quantity": "1", "unit_price": null, "line_total": "-1.00"}
+  ],
+  "subtotal": "12.49",
+  "tax": null,
+  "tip": null,
+  "total": "14.49"
+}
