@@ -1,0 +1,14 @@
+{
+  "merchant": "CAMPUS MART #5436",
+  "purchase_date": "2026-09-14",
+  "items": [
+    {"raw_text": "GV WHL MLK", "item_code": "007874235186", "quantity": "1", "unit_price": null, "line_total": "3.62"},
+    {"raw_text": "TTLS 12PK", "item_code": "007874202906", "quantity": "1", "unit_price": null, "line_total": "2.98"},
+    {"raw_text": "PPR TWLS 6R", "item_code": "003700083749", "quantity": "1", "unit_price": null, "line_total": "9.47"},
+    {"raw_text": "RBN CLRPS", "item_code": "004163133771", "quantity": "2", "unit_price": "1.50", "line_total": "3.00"}
+  ],
+  "subtotal": "19.07",
+  "tax": "0.93",
+  "tip": null,
+  "total": "20.00"
+}

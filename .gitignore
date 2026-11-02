@@ -10,3 +10,9 @@ __pycache__/
 
 # IDE
 .vscode/
+
+# Test cache
+.pytest_cache/
+
+# Real receipts hold personal data and this repo is public
+evals/receipts/

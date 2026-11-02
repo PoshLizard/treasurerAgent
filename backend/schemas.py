@@ -1,4 +1,8 @@
-from pydantic import BaseModel, Field
+from datetime import date, datetime
+from decimal import Decimal
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator
 
 class Link(BaseModel):
     """A page the treasurer can act on"""
@@ -13,3 +17,42 @@ class Answer(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+
+class LineItem(BaseModel):
+    """One line on a receipt"""
+    raw_text: str = Field(description="The item name exactly as printed, without its code or price, e.g. 'GV WHL MLK'")
+    item_code: str | None = Field(description="The printed product or UPC code. Null if none is printed")
+    quantity: Decimal = Field(description="The printed quantity or weight, 1 if none is printed")
+    unit_price: Decimal | None = Field(description="The printed price per unit or per pound. Null if none is printed")
+    line_total: Decimal = Field(description="The amount printed for this line. Negative for discounts and coupons")
+
+# Fields are nullable because a required field pressures the model to invent a value
+class Receipt(BaseModel):
+    """The values printed on one receipt. Null means missing or unreadable, never a guess"""
+    merchant: str | None = Field(description="The store or restaurant name. Null if unreadable")
+    purchase_date: date | None = Field(description="The purchase date as YYYY-MM-DD. Null if unreadable")
+    items: list[LineItem] = Field(description="Every item, fee, deposit and discount in printed order. Leave out subtotal, tax, tip, total and payment lines")
+    subtotal: Decimal | None = Field(description="The printed subtotal. Null if none is printed")
+    tax: Decimal | None = Field(description="The printed tax. Null if none is printed")
+    tip: Decimal | None = Field(description="The tip, including a handwritten one. Null if none")
+    total: Decimal | None = Field(description="The final amount paid, including a handwritten total. Null if unreadable")
+
+    @field_validator("purchase_date", mode="before")
+    @classmethod
+    def drop_printed_time(cls, value):
+        # The model sometimes copies the time too, and a date field rejects a time
+        return value[:10] if isinstance(value, str) else value
+
+class ReceiptResult(BaseModel):
+    id: UUID
+    receipt: Receipt
+    issues: list[str]
+
+class ReceiptSummary(BaseModel):
+    id: UUID
+    merchant: str | None
+    purchase_date: date | None
+    total: Decimal | None
+    status: str
+    issues: list[str]
+    created_at: datetime

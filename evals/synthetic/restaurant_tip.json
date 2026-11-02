@@ -1,0 +1,13 @@
+{
+  "merchant": "NOODLE HOUSE",
+  "purchase_date": "2026-10-02",
+  "items": [
+    {"raw_text": "PAD THAI", "item_code": null, "quantity": "1", "unit_price": null, "line_total": "13.50"},
+    {"raw_text": "VEG FRIED RICE", "item_code": null, "quantity": "1", "unit_price": null, "line_total": "11.25"},
+    {"raw_text": "THAI TEA", "item_code": null, "quantity": "3", "unit_price": "3.75", "line_total": "11.25"}
+  ],
+  "subtotal": "36.00",
+  "tax": null,
+  "tip": "7.20",
+  "total": "43.20"
+}
