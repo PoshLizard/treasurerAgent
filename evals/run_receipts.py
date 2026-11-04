@@ -14,11 +14,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
+from gemini_models import FALLBACK_MODEL, PRIMARY_MODEL
 from receipt_checks import check_receipt
 from receipts import build_extractor, extract_receipt
 from schemas import Receipt
 
-MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+# The models the app uses. Add others here to compare them on the same receipts
+MODELS = [PRIMARY_MODEL, FALLBACK_MODEL]
 MIME_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
               ".heic": "image/heic", ".heif": "image/heif"}
 
@@ -32,6 +34,12 @@ def wrong_fields(expected: Receipt, actual: Receipt) -> list[str]:
     if Counter(item.line_total for item in expected.items) != Counter(item.line_total for item in actual.items):
         wrong.append("items")
     return wrong
+
+
+def classify(wrong: list[str], flagged: bool) -> str:
+    # A silent error is the outcome that matters: a wrong value nothing warned the treasurer about
+    return {(False, False): "correct", (False, True): "correct, flagged",
+            (True, True): "wrong, flagged", (True, False): "SILENT ERROR"}[(bool(wrong), flagged)]
 
 
 def run_model(model_name: str, labeled: list[tuple[Path, Receipt]]) -> None:
@@ -54,11 +62,8 @@ def run_model(model_name: str, labeled: list[tuple[Path, Receipt]]) -> None:
             continue
 
         wrong = wrong_fields(expected, actual)
-        flagged = bool(check_receipt(actual))
         field_errors.update(wrong)
-        # A silent error is the outcome that matters: a wrong value nothing warned the treasurer about
-        outcome = {(False, False): "correct", (False, True): "correct, flagged",
-                   (True, True): "wrong, flagged", (True, False): "SILENT ERROR"}[(bool(wrong), flagged)]
+        outcome = classify(wrong, flagged=bool(check_receipt(actual)))
         outcomes[outcome] += 1
         print(f"  {image_path.name}: {outcome}" + (f" ({', '.join(wrong)})" if wrong else ""))
 

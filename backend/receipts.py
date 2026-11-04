@@ -3,8 +3,10 @@ load_dotenv()  # before building the models, which read GEMINI_API_KEY when cons
 
 import base64
 
+from langchain_core.exceptions import OutputParserException
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from gemini_models import FALLBACK_MODEL, PRIMARY_MODEL
 from schemas import Receipt
 
 PROMPT = """Extract this receipt.
@@ -22,15 +24,19 @@ def build_extractor(model_name: str):
 
 # ModelFallbackMiddleware only runs inside the agent, and extraction doesn't use the agent.
 # The steps never change and it has no tools, so text on a receipt can't trigger any action.
-extractor = build_extractor("gemini-3.5-flash").with_fallbacks([build_extractor("gemini-3.5-flash-lite")])
+extractor = build_extractor(PRIMARY_MODEL).with_fallbacks([build_extractor(FALLBACK_MODEL)])
 
 
 def extract_receipt(image: bytes, mime_type: str, runnable=extractor) -> Receipt | None:
     """Read a receipt image. Returns None if the model doesn't produce a usable result."""
-    return runnable.invoke([{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": PROMPT},
-            {"type": "image", "base64": base64.b64encode(image).decode(), "mime_type": mime_type},
-        ],
-    }])
+    try:
+        return runnable.invoke([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": PROMPT},
+                {"type": "image", "base64": base64.b64encode(image).decode(), "mime_type": mime_type},
+            ],
+        }])
+    except OutputParserException:
+        # Output that doesn't fit the Receipt schema, from the fallback model too
+        return None

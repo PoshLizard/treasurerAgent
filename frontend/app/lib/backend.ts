@@ -1,0 +1,25 @@
+// Fails the build if a Client Component imports this, so API_SECRET can never reach the browser
+import "server-only";
+
+type BackendRequest = { method?: string; headers?: Record<string, string>; body?: BodyInit };
+
+export function backendFetch(path: string, init: BackendRequest = {}) {
+  return fetch(`${process.env.BACKEND_URL}${path}`, {
+    ...init,
+    headers: { ...init.headers, "X-API-Key": process.env.API_SECRET || "" },
+  });
+}
+
+// For route handlers: passes the backend's response through, error messages included
+export async function forwardToBackend(path: string, init: BackendRequest = {}) {
+  let response: Response;
+  try {
+    response = await backendFetch(path, init);
+  } catch {
+    return Response.json({ detail: "Couldn't reach the server. Try again in a minute." }, { status: 502 });
+  }
+  return new Response(await response.text(), {
+    status: response.status,
+    headers: { "Content-Type": response.headers.get("Content-Type") ?? "text/plain" },
+  });
+}

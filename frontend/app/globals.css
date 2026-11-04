@@ -1,26 +1,48 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Each color becomes a utility: bg-paper, text-ink, border-line and so on */
+@theme {
+  --color-paper: #efe7d8;
+  --color-sand: #e5dac6;
+  --color-panel: #fbf8f2;
+  --color-ink: #26221d;
+  --color-muted: #6e6455;
+  --color-line: #ddd2bf;
+  --color-line-strong: #b9ac94;
+  --color-ok: #2f6b3a;
+  --color-ok-bg: #e3edd9;
+  --color-warn: #8a5a0b;
+  --color-warn-bg: #f5e6c4;
+  --color-error: #a3321f;
+
+  --animate-scan: scan 1.6s ease-in-out infinite alternate;
+  --animate-blink: blink 1.2s ease-in-out infinite;
+  --animate-toast-in: toast-in 160ms ease-out;
+
+  @keyframes scan {
+    from { top: 0; }
+    to { top: calc(100% - 3px); }
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 0.2; }
+    50% { opacity: 1; }
+  }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(8px); }
+  }
 }
 
+/* inline, because these point at variables next/font sets on <html> */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  background: var(--color-paper);
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
 }

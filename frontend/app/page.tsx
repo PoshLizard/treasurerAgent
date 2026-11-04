@@ -1,15 +1,17 @@
-import Link from "next/link";
-import ChatBox from "./ui/chat-box";
+import type { Metadata } from "next";
+import PageHeader from "./ui/page-header";
+import ReceiptUpload from "./ui/receipt-upload";
 
-export default function Home() {
+export const metadata: Metadata = { title: "Process a receipt" };
+
+export default function ProcessReceiptPage() {
   return (
-    <main className="mx-auto max-w-2xl p-8">
-      <h1 className="text-2xl font-bold mb-4">Treasurer Agent Chat</h1>
-      <Link href="/receipts" className="block text-blue-600 underline">
-        Process a receipt
-      </Link>
-      <ChatBox />
-    </main>
-
+    <div className="mx-auto max-w-2xl">
+      <PageHeader
+        title="Process a receipt"
+        description="Upload a photo. Gemini reads it, the math is checked in code, and the receipt is saved with its photo for review."
+      />
+      <ReceiptUpload />
+    </div>
   );
 }
