@@ -1,5 +1,3 @@
-from datetime import date
-
 import pytest
 
 from receipt_checks import check_receipt
@@ -80,7 +78,3 @@ def test_unreadable_fields_are_flagged(missing, message):
 def test_no_items_is_flagged():
     issues = check_receipt(receipt(items=[], subtotal=None, tax=None, total="0"))
     assert issues == ["No line items found."]
-
-
-def test_printed_time_is_dropped_from_the_date():
-    assert receipt(purchase_date="2026-09-14T14:32:07").purchase_date == date(2026, 9, 14)

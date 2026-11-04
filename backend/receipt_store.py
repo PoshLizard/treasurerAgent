@@ -8,16 +8,19 @@ import psycopg
 import requests
 from psycopg.rows import dict_row
 
-from schemas import Receipt, ReceiptSummary
+from schemas import Receipt, ReceiptDetail, ReceiptSummary
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-BUCKET_URL = f"{os.environ['SUPABASE_URL'].rstrip('/')}/storage/v1/object/receipts"
+STORAGE_URL = f"{os.environ['SUPABASE_URL'].rstrip('/')}/storage/v1"
+BUCKET_URL = f"{STORAGE_URL}/object/receipts"
 # This key bypasses Supabase's access rules, so it must only ever exist on the backend
 STORAGE_HEADERS = {"apikey": os.environ["SUPABASE_SECRET_KEY"]}
 
 FILE_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
                    "image/heic": "heic", "image/heif": "heif"}
 MAX_LISTED_RECEIPTS = 50
+# Long enough to load the page, short enough that a copied link soon stops working
+SIGNED_URL_SECONDS = 600
 
 
 def _upload_image(path: str, image: bytes, mime_type: str) -> None:
@@ -30,6 +33,14 @@ def _delete_image(path: str) -> None:
     requests.delete(f"{BUCKET_URL}/{path}", headers=STORAGE_HEADERS, timeout=30).raise_for_status()
 
 
+def _signed_image_url(path: str) -> str:
+    """Return a link to a photo that the browser can load without the secret key, until it expires."""
+    response = requests.post(f"{STORAGE_URL}/object/sign/receipts/{path}", json={"expiresIn": SIGNED_URL_SECONDS},
+                             headers=STORAGE_HEADERS, timeout=30)
+    response.raise_for_status()
+    return f"{STORAGE_URL}{response.json()['signedURL']}"
+
+
 def duplicate_issues(receipt: Receipt) -> list[str]:
     """Flag a receipt matching a saved one, so one purchase can't be reimbursed twice.
 
@@ -39,15 +50,15 @@ def duplicate_issues(receipt: Receipt) -> list[str]:
 
     with psycopg.connect(DATABASE_URL) as conn:
         match = conn.execute(
-            """select created_at from receipts
+            """select 1 from receipts
                where lower(merchant) = lower(%s) and purchase_date = %s and total = %s
-               order by created_at limit 1""",
+               limit 1""",
             (receipt.merchant, receipt.purchase_date, receipt.total),
         ).fetchone()
 
     if match is None:
         return []
-    return [f"Possible duplicate: a receipt with the same store, date and total was saved on {match[0]:%b %d, %Y}."]
+    return ["Possible duplicate: a receipt with the same store, date and total is already saved."]
 
 
 def save_receipt(receipt: Receipt, issues: list[str], image: bytes, mime_type: str) -> UUID:
@@ -88,3 +99,25 @@ def list_receipts() -> list[ReceiptSummary]:
             (MAX_LISTED_RECEIPTS,),
         ).fetchall()
     return [ReceiptSummary(**row) for row in rows]
+
+
+def get_receipt(receipt_id: UUID) -> ReceiptDetail | None:
+    """Return one saved receipt with its line items and a link to its photo, or None if it doesn't exist."""
+    with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+        row = conn.execute(
+            """select id, merchant, purchase_date, subtotal, tax, tip, total, issues, status, created_at, image_path
+               from receipts where id = %s""",
+            (receipt_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        items = conn.execute(
+            """select raw_text, item_code, quantity, unit_price, line_total
+               from line_items where receipt_id = %s order by position""",
+            (receipt_id,),
+        ).fetchall()
+
+    receipt = Receipt(items=items, **{field: row[field] for field in
+                                      ("merchant", "purchase_date", "subtotal", "tax", "tip", "total")})
+    return ReceiptDetail(id=row["id"], receipt=receipt, issues=row["issues"], status=row["status"],
+                         created_at=row["created_at"], image_url=_signed_image_url(row["image_path"]))

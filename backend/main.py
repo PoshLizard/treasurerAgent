@@ -2,9 +2,10 @@ from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile
 from langchain_google_genai.chat_models import GoogleAPIError
 from agent import run_agent
 from receipt_checks import check_receipt
-from receipt_store import duplicate_issues, list_receipts, save_receipt
+from receipt_store import duplicate_issues, get_receipt, list_receipts, save_receipt
 from receipts import extract_receipt
-from schemas import Answer, ChatRequest, ReceiptResult, ReceiptSummary
+from schemas import Answer, ChatRequest, ReceiptDetail, ReceiptResult, ReceiptSummary
+from uuid import UUID
 import os
 import psycopg
 import requests
@@ -61,3 +62,14 @@ def get_receipts() -> list[ReceiptSummary]:
         return list_receipts()
     except psycopg.Error:
         raise HTTPException(status_code=503, detail="Couldn't load saved receipts. Try again in a minute.")
+
+# Typed as UUID, so FastAPI answers 422 for anything else before the database sees it
+@app.get("/receipts/{receipt_id}", dependencies=[Depends(require_api_secret)])
+def get_one_receipt(receipt_id: UUID) -> ReceiptDetail:
+    try:
+        detail = get_receipt(receipt_id)
+    except (psycopg.Error, requests.RequestException):
+        raise HTTPException(status_code=503, detail="Couldn't load that receipt. Try again in a minute.")
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Receipt not found.")
+    return detail

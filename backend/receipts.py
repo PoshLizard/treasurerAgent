@@ -3,6 +3,7 @@ load_dotenv()  # before building the models, which read GEMINI_API_KEY when cons
 
 import base64
 
+from langchain_core.exceptions import OutputParserException
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from schemas import Receipt
@@ -27,10 +28,14 @@ extractor = build_extractor("gemini-3.5-flash").with_fallbacks([build_extractor(
 
 def extract_receipt(image: bytes, mime_type: str, runnable=extractor) -> Receipt | None:
     """Read a receipt image. Returns None if the model doesn't produce a usable result."""
-    return runnable.invoke([{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": PROMPT},
-            {"type": "image", "base64": base64.b64encode(image).decode(), "mime_type": mime_type},
-        ],
-    }])
+    try:
+        return runnable.invoke([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": PROMPT},
+                {"type": "image", "base64": base64.b64encode(image).decode(), "mime_type": mime_type},
+            ],
+        }])
+    except OutputParserException:
+        # Output that doesn't fit the Receipt schema, from the fallback model too
+        return None

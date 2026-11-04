@@ -39,14 +39,26 @@ class Receipt(BaseModel):
 
     @field_validator("purchase_date", mode="before")
     @classmethod
-    def drop_printed_time(cls, value):
-        # The model sometimes copies the time too, and a date field rejects a time
-        return value[:10] if isinstance(value, str) else value
+    def parse_printed_date(cls, value):
+        # The model sometimes copies the time too, which a date field rejects. A date that still
+        # won't parse (misread as 2026-02-30, say) becomes null and gets flagged, instead of
+        # failing validation and losing every line item with it
+        if not isinstance(value, str):
+            return value
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
 
 class ReceiptResult(BaseModel):
     id: UUID
     receipt: Receipt
     issues: list[str]
+
+class ReceiptDetail(ReceiptResult):
+    status: str
+    created_at: datetime
+    image_url: str = Field(description="A link to the photo that expires after a few minutes")
 
 class ReceiptSummary(BaseModel):
     id: UUID

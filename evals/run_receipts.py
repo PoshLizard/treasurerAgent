@@ -34,6 +34,12 @@ def wrong_fields(expected: Receipt, actual: Receipt) -> list[str]:
     return wrong
 
 
+def classify(wrong: list[str], flagged: bool) -> str:
+    # A silent error is the outcome that matters: a wrong value nothing warned the treasurer about
+    return {(False, False): "correct", (False, True): "correct, flagged",
+            (True, True): "wrong, flagged", (True, False): "SILENT ERROR"}[(bool(wrong), flagged)]
+
+
 def run_model(model_name: str, labeled: list[tuple[Path, Receipt]]) -> None:
     extractor = build_extractor(model_name)
     outcomes = Counter()
@@ -54,11 +60,8 @@ def run_model(model_name: str, labeled: list[tuple[Path, Receipt]]) -> None:
             continue
 
         wrong = wrong_fields(expected, actual)
-        flagged = bool(check_receipt(actual))
         field_errors.update(wrong)
-        # A silent error is the outcome that matters: a wrong value nothing warned the treasurer about
-        outcome = {(False, False): "correct", (False, True): "correct, flagged",
-                   (True, True): "wrong, flagged", (True, False): "SILENT ERROR"}[(bool(wrong), flagged)]
+        outcome = classify(wrong, flagged=bool(check_receipt(actual)))
         outcomes[outcome] += 1
         print(f"  {image_path.name}: {outcome}" + (f" ({', '.join(wrong)})" if wrong else ""))
 
