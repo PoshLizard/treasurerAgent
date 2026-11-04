@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile
-from langchain_google_genai.chat_models import GoogleAPIError
+from langchain_google_genai.chat_models import GoogleAPIError, GoogleRateLimitError
 from agent import run_agent
 from receipt_checks import check_receipt
-from receipt_store import duplicate_issues, get_receipt, list_receipts, save_receipt
+from receipt_store import duplicate_issues, get_receipt, list_receipts, photo_url, save_receipt
 from receipts import extract_receipt
-from schemas import Answer, ChatRequest, ReceiptDetail, ReceiptResult, ReceiptSummary
+from schemas import Answer, ChatRequest, PhotoLink, ReceiptDetail, ReceiptResult, ReceiptSummary
 from uuid import UUID
 import os
 import psycopg
@@ -14,6 +14,10 @@ import secrets
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 MAX_IMAGE_BYTES = 7 * 1024 * 1024
+
+MODEL_BUSY = "The AI model is busy right now. Try again in a minute."
+# Only reached once the fallback model hits its limit too. A daily quota can take hours to reset
+MODEL_LIMIT_REACHED = "The AI model's usage limit was reached. Try again later."
 
 app = FastAPI()
 
@@ -31,7 +35,9 @@ def chat(request: ChatRequest) -> Answer:
     try:
         return run_agent(request.message)
     except GoogleAPIError:
-        raise HTTPException(status_code=503, detail="The AI model is busy right now. Try again in a minute.")
+        raise HTTPException(status_code=503, detail=MODEL_BUSY)
+    except GoogleRateLimitError:
+        raise HTTPException(status_code=503, detail=MODEL_LIMIT_REACHED)
 
 @app.post("/receipts", dependencies=[Depends(require_api_secret)])
 def upload_receipt(image: UploadFile) -> ReceiptResult:
@@ -45,7 +51,9 @@ def upload_receipt(image: UploadFile) -> ReceiptResult:
     try:
         receipt = extract_receipt(data, image.content_type)
     except GoogleAPIError:
-        raise HTTPException(status_code=503, detail="The AI model is busy right now. Try again in a minute.")
+        raise HTTPException(status_code=503, detail=MODEL_BUSY)
+    except GoogleRateLimitError:
+        raise HTTPException(status_code=503, detail=MODEL_LIMIT_REACHED)
     if receipt is None:
         raise HTTPException(status_code=422, detail="Couldn't read that image. Try a clearer photo.")
 
@@ -68,8 +76,19 @@ def get_receipts() -> list[ReceiptSummary]:
 def get_one_receipt(receipt_id: UUID) -> ReceiptDetail:
     try:
         detail = get_receipt(receipt_id)
-    except (psycopg.Error, requests.RequestException):
+    except psycopg.Error:
         raise HTTPException(status_code=503, detail="Couldn't load that receipt. Try again in a minute.")
     if detail is None:
         raise HTTPException(status_code=404, detail="Receipt not found.")
     return detail
+
+# A fresh link on every request, so a page left open never holds an expired one
+@app.get("/receipts/{receipt_id}/photo", dependencies=[Depends(require_api_secret)])
+def get_photo_link(receipt_id: UUID) -> PhotoLink:
+    try:
+        url = photo_url(receipt_id)
+    except (psycopg.Error, requests.RequestException):
+        raise HTTPException(status_code=503, detail="Couldn't load the photo. Try again in a minute.")
+    if url is None:
+        raise HTTPException(status_code=404, detail="Receipt not found.")
+    return PhotoLink(url=url)

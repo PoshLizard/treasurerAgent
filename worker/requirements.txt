@@ -1,0 +1,4 @@
+# The planned Student Central form-filling worker, which runs on my laptop, not on Render.
+# Kept out of backend/requirements.txt so the deployed backend doesn't install a browser driver.
+# It drives the installed Edge (channel="msedge"), so `playwright install` isn't needed.
+playwright==1.64.1

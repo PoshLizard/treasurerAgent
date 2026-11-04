@@ -6,7 +6,7 @@ import psycopg
 import pytest
 import requests
 from fastapi.testclient import TestClient
-from langchain_google_genai.chat_models import GoogleAPIError
+from langchain_google_genai.chat_models import GoogleAPIError, GoogleRateLimitError
 
 import main
 from schemas import Answer, Receipt, ReceiptDetail, ReceiptSummary
@@ -21,6 +21,17 @@ RECEIPT = Receipt(merchant="DOLLAR TREE", purchase_date="2024-09-19",
 
 def gemini_outage(*args, **kwargs):
     raise GoogleAPIError(503, {"error": {"message": "overloaded"}})
+
+
+def gemini_rate_limited(*args, **kwargs):
+    # A different error class from an outage: it doesn't inherit from GoogleAPIError
+    raise GoogleRateLimitError("429 RESOURCE_EXHAUSTED")
+
+
+MODEL_FAILURES = [
+    (gemini_outage, "The AI model is busy right now. Try again in a minute."),
+    (gemini_rate_limited, "The AI model's usage limit was reached. Try again later."),
+]
 
 
 def database_down(*args, **kwargs):
@@ -52,6 +63,7 @@ def test_health_needs_no_key():
 
 @pytest.mark.parametrize("method, path", [
     ("POST", "/chat"), ("POST", "/receipts"), ("GET", "/receipts"), ("GET", f"/receipts/{uuid4()}"),
+    ("GET", f"/receipts/{uuid4()}/photo"),
 ])
 @pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong"}])
 def test_every_other_route_needs_the_api_key(method, path, headers):
@@ -93,10 +105,12 @@ def test_oversized_photo_is_rejected(saved):
     assert saved == []
 
 
-def test_model_outage_asks_to_try_again(monkeypatch, saved):
-    monkeypatch.setattr(main, "extract_receipt", gemini_outage)
+@pytest.mark.parametrize("failure, detail", MODEL_FAILURES)
+def test_model_failure_on_upload_explains_itself(monkeypatch, saved, failure, detail):
+    monkeypatch.setattr(main, "extract_receipt", failure)
     response = upload()
     assert response.status_code == 503
+    assert response.json()["detail"] == detail
     assert saved == []
 
 
@@ -136,7 +150,7 @@ def test_list_receipts_when_the_database_is_down(monkeypatch):
 
 def test_get_one_receipt(monkeypatch):
     detail = ReceiptDetail(id=RECEIPT_ID, receipt=RECEIPT, issues=[], status="needs_review",
-                           created_at=datetime(2026, 11, 2, tzinfo=timezone.utc), image_url="https://signed.test/a.jpg")
+                           created_at=datetime(2026, 11, 2, tzinfo=timezone.utc))
     monkeypatch.setattr(main, "get_receipt", lambda receipt_id: detail if receipt_id == RECEIPT_ID else None)
 
     response = client.get(f"/receipts/{RECEIPT_ID}", headers=AUTH)
@@ -159,12 +173,33 @@ def test_malformed_receipt_id_never_reaches_the_database(monkeypatch):
     get_receipt.assert_not_called()
 
 
-@pytest.mark.parametrize("error", [psycopg.OperationalError("down"), requests.ConnectionError("down")])
-def test_get_one_receipt_when_storage_is_down(monkeypatch, error):
-    monkeypatch.setattr(main, "get_receipt", Mock(side_effect=error))
+def test_get_one_receipt_when_the_database_is_down(monkeypatch):
+    monkeypatch.setattr(main, "get_receipt", database_down)
     response = client.get(f"/receipts/{RECEIPT_ID}", headers=AUTH)
     assert response.status_code == 503
     assert response.json()["detail"] == "Couldn't load that receipt. Try again in a minute."
+
+
+# Photos: the page asks for a fresh link each time it shows one, so it never holds an expired link
+
+def test_photo_link(monkeypatch):
+    monkeypatch.setattr(main, "photo_url", lambda receipt_id: "https://signed.test/a.jpg" if receipt_id == RECEIPT_ID else None)
+    response = client.get(f"/receipts/{RECEIPT_ID}/photo", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"url": "https://signed.test/a.jpg"}
+
+
+def test_photo_link_for_a_missing_receipt_is_404(monkeypatch):
+    monkeypatch.setattr(main, "photo_url", lambda receipt_id: None)
+    assert client.get(f"/receipts/{uuid4()}/photo", headers=AUTH).status_code == 404
+
+
+@pytest.mark.parametrize("error", [psycopg.OperationalError("down"), requests.ConnectionError("down")])
+def test_photo_link_when_storage_is_down(monkeypatch, error):
+    monkeypatch.setattr(main, "photo_url", Mock(side_effect=error))
+    response = client.get(f"/receipts/{RECEIPT_ID}/photo", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Couldn't load the photo. Try again in a minute."
 
 
 # Chat
@@ -179,7 +214,9 @@ def test_chat_returns_the_agent_answer(monkeypatch):
     assert response.json() == answer.model_dump(mode="json")
 
 
-def test_chat_model_outage_asks_to_try_again(monkeypatch):
-    monkeypatch.setattr(main, "run_agent", gemini_outage)
+@pytest.mark.parametrize("failure, detail", MODEL_FAILURES)
+def test_model_failure_on_chat_explains_itself(monkeypatch, failure, detail):
+    monkeypatch.setattr(main, "run_agent", failure)
     response = client.post("/chat", headers=AUTH, json={"message": "fundraising ideas?"})
     assert response.status_code == 503
+    assert response.json()["detail"] == detail

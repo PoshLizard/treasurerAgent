@@ -34,7 +34,7 @@ export default async function ReceiptPage({ params }: PageProps<"/receipts/[id]"
 function ReceiptView({ detail }: { detail: ReceiptDetail }) {
   return (
     <div className="mt-4 grid items-start gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
-      <ReceiptPhoto src={detail.image_url} alt={`Photo of the ${detail.receipt.merchant ?? "unknown store"} receipt`} />
+      <ReceiptPhoto receiptId={detail.id} alt={`Photo of the ${detail.receipt.merchant ?? "unknown store"} receipt`} />
       <ReceiptCard receipt={detail.receipt} issues={detail.issues} status={detail.status} />
     </div>
   );

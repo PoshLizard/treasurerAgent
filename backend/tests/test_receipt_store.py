@@ -8,7 +8,7 @@ import pytest
 import requests
 
 import receipt_store
-from receipt_store import duplicate_issues, get_receipt, list_receipts, save_receipt
+from receipt_store import duplicate_issues, get_receipt, list_receipts, photo_url, save_receipt
 from schemas import LineItem, Receipt
 
 
@@ -182,12 +182,12 @@ def test_get_receipt_returns_none_when_it_does_not_exist(db, bucket):
     assert get_receipt(uuid4()) is None
 
 
-def test_get_receipt_rebuilds_the_receipt_with_a_photo_link(db, bucket):
+def test_get_receipt_rebuilds_the_receipt_and_its_items(db, bucket):
     receipt_id = uuid4()
     db.rows.append({"id": receipt_id, "merchant": "DOLLAR TREE", "purchase_date": date(2024, 9, 19),
                     "subtotal": Decimal("3.75"), "tax": Decimal("0"), "tip": None, "total": Decimal("3.75"),
                     "issues": ["Possible duplicate"], "status": "needs_review",
-                    "created_at": datetime(2026, 11, 2, tzinfo=timezone.utc), "image_path": f"{receipt_id}.jpg"})
+                    "created_at": datetime(2026, 11, 2, tzinfo=timezone.utc)})
     db.rows.append([
         {"raw_text": "RING POP", "item_code": None, "quantity": Decimal("1"), "unit_price": None, "line_total": Decimal("1.25")},
         {"raw_text": "KIT KAT", "item_code": "0034000", "quantity": Decimal("2"), "unit_price": Decimal("1.25"), "line_total": Decimal("2.50")},
@@ -199,8 +199,19 @@ def test_get_receipt_rebuilds_the_receipt_with_a_photo_link(db, bucket):
     assert detail.receipt == receipt()
     assert detail.issues == ["Possible duplicate"]
     assert detail.status == "needs_review"
-    assert detail.image_url == f"https://signed.test/{receipt_id}.jpg"
     assert "order by position" in db.queries[1][0]  # items come back in printed order
+
+
+def test_photo_url_links_to_the_receipts_photo(db, bucket):
+    receipt_id = uuid4()
+    db.rows.append((f"{receipt_id}.png",))
+    assert photo_url(receipt_id) == f"https://signed.test/{receipt_id}.png"
+    assert db.params_of("from receipts") == (receipt_id,)
+
+
+def test_photo_url_is_none_when_the_receipt_does_not_exist(db, bucket):
+    db.rows.append(None)
+    assert photo_url(uuid4()) is None
 
 
 # Talking to Supabase Storage

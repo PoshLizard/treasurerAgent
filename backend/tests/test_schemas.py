@@ -36,6 +36,21 @@ def test_unusable_date_becomes_null_instead_of_failing_the_receipt(printed):
     assert receipt(purchase_date=printed).purchase_date is None
 
 
+@pytest.mark.parametrize("printed, amount", [
+    ("1.25N", "1.25"),     # Dollar Tree marks untaxed items with N
+    ("3.00 T", "3.00"),    # other stores print a taxed flag after a space
+    ("$14.75", "14.75"),
+    ("1,234.50", "1234.50"),
+    ("1.00-", "-1.00"),    # some stores print discounts with the minus at the end
+])
+def test_printed_money_is_read_as_a_number(printed, amount):
+    # Copying a price exactly as printed must not throw away the whole receipt
+    item = {"raw_text": "RING POP", "item_code": None, "quantity": 1, "unit_price": printed, "line_total": printed}
+    parsed = receipt(items=[item], subtotal=printed, tax=printed, tip=printed, total=printed)
+    assert parsed.items[0].line_total == parsed.items[0].unit_price == Decimal(amount)
+    assert parsed.subtotal == parsed.tax == parsed.tip == parsed.total == Decimal(amount)
+
+
 def test_money_leaves_the_api_as_exact_strings():
     data = ReceiptResult(id=uuid4(), receipt=receipt(), issues=[]).model_dump(mode="json")
     assert data["receipt"]["total"] == "1.25"

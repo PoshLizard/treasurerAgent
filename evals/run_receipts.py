@@ -14,11 +14,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
+from gemini_models import FALLBACK_MODEL, PRIMARY_MODEL
 from receipt_checks import check_receipt
 from receipts import build_extractor, extract_receipt
 from schemas import Receipt
 
-MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+# The models the app uses. Add others here to compare them on the same receipts
+MODELS = [PRIMARY_MODEL, FALLBACK_MODEL]
 MIME_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
               ".heic": "image/heic", ".heif": "image/heif"}
 

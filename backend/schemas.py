@@ -1,8 +1,21 @@
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
+
+# A tax flag printed after a price: "1.25N" at Dollar Tree, "3.00 T" elsewhere
+TAX_FLAG = re.compile(r"\s*[A-Za-z]{1,2}$")
+
+
+def parse_printed_money(value):
+    """Turn a price copied exactly as printed into a number, so one "1.25N" can't fail the whole receipt."""
+    if not isinstance(value, str):
+        return value
+    text = TAX_FLAG.sub("", value.strip().replace("$", "").replace(",", ""))
+    # Some stores print discounts with the minus at the end: "1.00-"
+    return f"-{text[:-1].strip()}" if text.endswith("-") else text
 
 class Link(BaseModel):
     """A page the treasurer can act on"""
@@ -26,6 +39,8 @@ class LineItem(BaseModel):
     unit_price: Decimal | None = Field(description="The printed price per unit or per pound. Null if none is printed")
     line_total: Decimal = Field(description="The amount printed for this line. Negative for discounts and coupons")
 
+    _parse_money = field_validator("unit_price", "line_total", mode="before")(parse_printed_money)
+
 # Fields are nullable because a required field pressures the model to invent a value
 class Receipt(BaseModel):
     """The values printed on one receipt. Null means missing or unreadable, never a guess"""
@@ -36,6 +51,8 @@ class Receipt(BaseModel):
     tax: Decimal | None = Field(description="The printed tax. Null if none is printed")
     tip: Decimal | None = Field(description="The tip, including a handwritten one. Null if none")
     total: Decimal | None = Field(description="The final amount paid, including a handwritten total. Null if unreadable")
+
+    _parse_money = field_validator("subtotal", "tax", "tip", "total", mode="before")(parse_printed_money)
 
     @field_validator("purchase_date", mode="before")
     @classmethod
@@ -58,7 +75,9 @@ class ReceiptResult(BaseModel):
 class ReceiptDetail(ReceiptResult):
     status: str
     created_at: datetime
-    image_url: str = Field(description="A link to the photo that expires after a few minutes")
+
+class PhotoLink(BaseModel):
+    url: str = Field(description="A link to the photo that expires after a minute")
 
 class ReceiptSummary(BaseModel):
     id: UUID

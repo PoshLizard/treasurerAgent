@@ -6,6 +6,7 @@ import base64
 from langchain_core.exceptions import OutputParserException
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from gemini_models import FALLBACK_MODEL, PRIMARY_MODEL
 from schemas import Receipt
 
 PROMPT = """Extract this receipt.
@@ -23,7 +24,7 @@ def build_extractor(model_name: str):
 
 # ModelFallbackMiddleware only runs inside the agent, and extraction doesn't use the agent.
 # The steps never change and it has no tools, so text on a receipt can't trigger any action.
-extractor = build_extractor("gemini-3.5-flash").with_fallbacks([build_extractor("gemini-3.5-flash-lite")])
+extractor = build_extractor(PRIMARY_MODEL).with_fallbacks([build_extractor(FALLBACK_MODEL)])
 
 
 def extract_receipt(image: bytes, mime_type: str, runnable=extractor) -> Receipt | None:

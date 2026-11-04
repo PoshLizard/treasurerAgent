@@ -19,8 +19,9 @@ STORAGE_HEADERS = {"apikey": os.environ["SUPABASE_SECRET_KEY"]}
 FILE_EXTENSIONS = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
                    "image/heic": "heic", "image/heif": "heif"}
 MAX_LISTED_RECEIPTS = 50
-# Long enough to load the page, short enough that a copied link soon stops working
-SIGNED_URL_SECONDS = 600
+# The browser follows the link the moment it gets it, so a minute is plenty, and a copied
+# link stops working almost right away
+SIGNED_URL_SECONDS = 60
 
 
 def _upload_image(path: str, image: bytes, mime_type: str) -> None:
@@ -102,10 +103,10 @@ def list_receipts() -> list[ReceiptSummary]:
 
 
 def get_receipt(receipt_id: UUID) -> ReceiptDetail | None:
-    """Return one saved receipt with its line items and a link to its photo, or None if it doesn't exist."""
+    """Return one saved receipt with its line items, or None if it doesn't exist."""
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         row = conn.execute(
-            """select id, merchant, purchase_date, subtotal, tax, tip, total, issues, status, created_at, image_path
+            """select id, merchant, purchase_date, subtotal, tax, tip, total, issues, status, created_at
                from receipts where id = %s""",
             (receipt_id,),
         ).fetchone()
@@ -120,4 +121,11 @@ def get_receipt(receipt_id: UUID) -> ReceiptDetail | None:
     receipt = Receipt(items=items, **{field: row[field] for field in
                                       ("merchant", "purchase_date", "subtotal", "tax", "tip", "total")})
     return ReceiptDetail(id=row["id"], receipt=receipt, issues=row["issues"], status=row["status"],
-                         created_at=row["created_at"], image_url=_signed_image_url(row["image_path"]))
+                         created_at=row["created_at"])
+
+
+def photo_url(receipt_id: UUID) -> str | None:
+    """Return a fresh, short-lived link to a receipt's photo, or None if the receipt doesn't exist."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        row = conn.execute("select image_path from receipts where id = %s", (receipt_id,)).fetchone()
+    return None if row is None else _signed_image_url(row[0])

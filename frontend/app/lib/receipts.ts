@@ -16,7 +16,7 @@ export type Receipt = {
   total: string | null;
 };
 export type ReceiptResult = { id: string; receipt: Receipt; issues: string[] };
-export type ReceiptDetail = ReceiptResult & { status: string; created_at: string; image_url: string };
+export type ReceiptDetail = ReceiptResult & { status: string; created_at: string };
 export type ReceiptSummary = {
   id: string;
   merchant: string | null;
