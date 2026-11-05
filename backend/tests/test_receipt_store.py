@@ -8,7 +8,8 @@ import pytest
 import requests
 
 import receipt_store
-from receipt_store import duplicate_issues, get_receipt, list_receipts, photo_url, save_receipt
+from receipt_store import (delete_receipt, duplicate_issues, get_receipt, list_receipts, photo_url, save_receipt,
+                           update_receipt)
 from schemas import LineItem, Receipt
 
 
@@ -18,11 +19,14 @@ class FakeConnection:
     def __init__(self):
         self.rows = []     # one entry per fetchone() or fetchall(), in order
         self.queries = []  # (sql, params) for every query run
+        self.rolled_back = False
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc_info):
+    def __exit__(self, exc_type, *rest):
+        # Like psycopg: leaving the block with an error rolls the transaction back
+        self.rolled_back = exc_type is not None
         return False
 
     def execute(self, sql, params=None):
@@ -55,7 +59,7 @@ class FakeBucket:
         self.files[path] = (image, mime_type)
 
     def delete(self, path):
-        del self.files[path]
+        self.files.pop(path, None)  # like Supabase's bulk delete, a missing file isn't an error
 
     def signed_url(self, path):
         return f"https://signed.test/{path}"
@@ -112,7 +116,14 @@ def test_matching_saved_receipt_is_flagged(db):
 
     # No "saved on" date: the server runs in UTC, so evening saves would show tomorrow's date
     assert issues == ["Possible duplicate: a receipt with the same store, date and total is already saved."]
-    assert db.params_of("from receipts") == ("DOLLAR TREE", date(2024, 9, 19), Decimal("3.75"))
+    assert db.params_of("from receipts") == ("DOLLAR TREE", date(2024, 9, 19), Decimal("3.75"), None)
+
+
+def test_an_edited_receipt_is_not_its_own_duplicate(db):
+    receipt_id = uuid4()
+    db.rows.append(None)
+    assert duplicate_issues(receipt(), ignore_id=receipt_id) == []
+    assert db.params_of("from receipts")[-1] == receipt_id
 
 
 def test_no_match_means_no_duplicate_issue(db):
@@ -160,6 +171,58 @@ def test_failed_upload_never_touches_the_database(monkeypatch, db, bucket):
         save_receipt(receipt(), [], b"photo", "image/jpeg")
 
     assert db.queries == []
+
+
+# Editing and deleting
+
+def test_update_replaces_the_receipt_and_its_items(db):
+    receipt_id = uuid4()
+    db.rows.append((receipt_id,))  # the update's "returning id"
+    edited = receipt(merchant="DOLLAR TREE #1678", items=receipt().items[:1])
+
+    assert update_receipt(receipt_id, edited, ["Line items add up to 1.25, but the subtotal says 3.75."]) is True
+
+    updated = db.params_of("update receipts")
+    assert updated[:2] == ("DOLLAR TREE #1678", date(2024, 9, 19))
+    assert updated[-2:] == (["Line items add up to 1.25, but the subtotal says 3.75."], receipt_id)
+    assert db.params_of("delete from line_items") == (receipt_id,)
+    assert [(row[1], row[2]) for row in db.params_of("insert into line_items")] == [(0, "RING POP")]
+
+
+def test_update_of_a_missing_receipt_changes_nothing(db):
+    db.rows.append(None)
+    assert update_receipt(uuid4(), receipt(), []) is False
+    assert not any("line_items" in sql for sql, _ in db.queries)
+
+
+def test_delete_removes_the_receipt_and_its_photo(db, bucket):
+    receipt_id = uuid4()
+    bucket.files[f"{receipt_id}.jpg"] = (b"photo", "image/jpeg")
+    db.rows.append((f"{receipt_id}.jpg",))  # the delete's "returning image_path"
+
+    assert delete_receipt(receipt_id) is True
+
+    assert bucket.files == {}
+    assert db.params_of("delete from receipts") == (receipt_id,)  # line items go with it (on delete cascade)
+
+
+def test_delete_of_a_missing_receipt_changes_nothing(db, bucket):
+    bucket.files["other.jpg"] = (b"photo", "image/jpeg")
+    db.rows.append(None)
+    assert delete_receipt(uuid4()) is False
+    assert list(bucket.files) == ["other.jpg"]
+
+
+def test_failed_photo_delete_keeps_the_receipt(monkeypatch, db, bucket):
+    # The photo goes before the transaction commits, so a storage failure rolls the row back
+    # instead of leaving a receipt that points at a missing photo
+    monkeypatch.setattr(receipt_store, "_delete_image", Mock(side_effect=requests.ConnectionError()))
+    db.rows.append(("x.jpg",))
+
+    with pytest.raises(requests.ConnectionError):
+        delete_receipt(uuid4())
+
+    assert db.rolled_back
 
 
 # Reading
@@ -232,6 +295,17 @@ def test_upload_sends_the_photo_with_its_type(monkeypatch):
     assert post.call_args.args[0] == "https://project.supabase.test/storage/v1/object/receipts/abc.png"
     assert post.call_args.kwargs["data"] == b"photo"
     assert post.call_args.kwargs["headers"] == {"apikey": "test-supabase-key", "Content-Type": "image/png"}
+
+
+def test_photo_delete_is_safe_to_repeat(monkeypatch):
+    # The bulk endpoint answers 200 for a file that's already gone, where the single one errors
+    delete = Mock(return_value=fake_response())
+    monkeypatch.setattr(requests, "delete", delete)
+
+    receipt_store._delete_image("abc.jpg")
+
+    assert delete.call_args.args[0] == "https://project.supabase.test/storage/v1/object/receipts"
+    assert delete.call_args.kwargs["json"] == {"prefixes": ["abc.jpg"]}
 
 
 def test_storage_errors_are_raised(monkeypatch):

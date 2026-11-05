@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { backendFetch } from "../../lib/backend";
 import type { ReceiptDetail } from "../../lib/receipts";
 import Notice from "../../ui/notice";
-import ReceiptCard from "../../ui/receipt-card";
+import ReceiptEditor from "../../ui/receipt-editor";
 import ReceiptPhoto from "../../ui/receipt-photo";
 
 export const metadata: Metadata = { title: "Receipt" };
@@ -35,7 +35,8 @@ function ReceiptView({ detail }: { detail: ReceiptDetail }) {
   return (
     <div className="mt-4 grid items-start gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
       <ReceiptPhoto receiptId={detail.id} alt={`Photo of the ${detail.receipt.merchant ?? "unknown store"} receipt`} />
-      <ReceiptCard receipt={detail.receipt} issues={detail.issues} status={detail.status} />
+      {/* key: a fresh editor after router.refresh() brings new data, instead of one holding the old copy */}
+      <ReceiptEditor key={JSON.stringify(detail)} initial={detail} />
     </div>
   );
 }

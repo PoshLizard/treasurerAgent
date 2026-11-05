@@ -1,7 +1,9 @@
+import json
 from datetime import datetime, timezone
 from unittest.mock import Mock
 from uuid import uuid4
 
+import httpx
 import psycopg
 import pytest
 import requests
@@ -28,9 +30,16 @@ def gemini_rate_limited(*args, **kwargs):
     raise GoogleRateLimitError("429 RESOURCE_EXHAUSTED")
 
 
+def gemini_timed_out(*args, **kwargs):
+    # The client gives up on a model that hangs (one took 5 minutes just to return a 503), and the
+    # error comes from httpx, not from Gemini's own error classes
+    raise httpx.ReadTimeout("timed out")
+
+
 MODEL_FAILURES = [
     (gemini_outage, "The AI model is busy right now. Try again in a minute."),
     (gemini_rate_limited, "The AI model's usage limit was reached. Try again later."),
+    (gemini_timed_out, "The AI model is busy right now. Try again in a minute."),
 ]
 
 
@@ -63,7 +72,8 @@ def test_health_needs_no_key():
 
 @pytest.mark.parametrize("method, path", [
     ("POST", "/chat"), ("POST", "/receipts"), ("GET", "/receipts"), ("GET", f"/receipts/{uuid4()}"),
-    ("GET", f"/receipts/{uuid4()}/photo"),
+    ("GET", f"/receipts/{uuid4()}/photo"), ("PUT", f"/receipts/{uuid4()}"), ("DELETE", f"/receipts/{uuid4()}"),
+    ("POST", "/chat/stream"),
 ])
 @pytest.mark.parametrize("headers", [{}, {"X-API-Key": "wrong"}])
 def test_every_other_route_needs_the_api_key(method, path, headers):
@@ -202,6 +212,97 @@ def test_photo_link_when_storage_is_down(monkeypatch, error):
     assert response.json()["detail"] == "Couldn't load the photo. Try again in a minute."
 
 
+# Editing and deleting
+
+def detail_of(receipt, issues):
+    return ReceiptDetail(id=RECEIPT_ID, receipt=receipt, issues=issues, status="needs_review",
+                         created_at=datetime(2026, 11, 2, tzinfo=timezone.utc))
+
+
+@pytest.fixture
+def edits(monkeypatch):
+    """Make every edit step succeed without Supabase. Returns the list of saved edits."""
+    saved_edits = []
+
+    def update_receipt(receipt_id, receipt, issues):
+        saved_edits.append({"id": receipt_id, "receipt": receipt, "issues": issues})
+        return receipt_id == RECEIPT_ID
+
+    monkeypatch.setattr(main, "update_receipt", update_receipt)
+    monkeypatch.setattr(main, "duplicate_issues", lambda receipt, ignore_id=None: [])
+    monkeypatch.setattr(main, "get_receipt", lambda receipt_id: detail_of(saved_edits[-1]["receipt"], saved_edits[-1]["issues"]))
+    return saved_edits
+
+
+def test_edit_saves_the_corrections_and_rechecks_them(edits):
+    corrected = RECEIPT.model_copy(update={"merchant": "DOLLAR TREE #1678", "total": RECEIPT.total + 1})
+
+    response = client.put(f"/receipts/{RECEIPT_ID}", headers=AUTH, json=corrected.model_dump(mode="json"))
+
+    assert response.status_code == 200
+    assert response.json()["receipt"]["merchant"] == "DOLLAR TREE #1678"
+    # The math is checked again, so a correction that doesn't add up is still flagged
+    assert edits[0]["issues"] == ["Subtotal, tax and tip add up to 1.25, but the total says 2.25."]
+    assert response.json()["issues"] == edits[0]["issues"]
+
+
+def test_edit_checks_for_duplicates_other_than_itself(monkeypatch, edits):
+    ignored = []
+
+    def duplicate_issues(receipt, ignore_id=None):
+        ignored.append(ignore_id)
+        return []
+
+    monkeypatch.setattr(main, "duplicate_issues", duplicate_issues)
+    client.put(f"/receipts/{RECEIPT_ID}", headers=AUTH, json=RECEIPT.model_dump(mode="json"))
+    assert ignored == [RECEIPT_ID]
+
+
+def test_editing_a_missing_receipt_is_404(edits):
+    response = client.put(f"/receipts/{uuid4()}", headers=AUTH, json=RECEIPT.model_dump(mode="json"))
+    assert response.status_code == 404
+
+
+def test_an_edit_without_items_is_rejected(edits):
+    response = client.put(f"/receipts/{RECEIPT_ID}", headers=AUTH, json={"merchant": "DOLLAR TREE"})
+    assert response.status_code == 422
+    assert edits == []
+
+
+@pytest.mark.parametrize("error", [psycopg.OperationalError("down"), requests.ConnectionError("down")])
+def test_edit_when_storage_is_down(monkeypatch, edits, error):
+    monkeypatch.setattr(main, "update_receipt", Mock(side_effect=error))
+    response = client.put(f"/receipts/{RECEIPT_ID}", headers=AUTH, json=RECEIPT.model_dump(mode="json"))
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Couldn't save your changes. Try again in a minute."
+
+
+def test_delete(monkeypatch):
+    deleted = []
+
+    def delete_receipt(receipt_id):
+        deleted.append(receipt_id)
+        return True
+
+    monkeypatch.setattr(main, "delete_receipt", delete_receipt)
+    response = client.delete(f"/receipts/{RECEIPT_ID}", headers=AUTH)
+    assert response.status_code == 204
+    assert deleted == [RECEIPT_ID]
+
+
+def test_deleting_a_missing_receipt_is_404(monkeypatch):
+    monkeypatch.setattr(main, "delete_receipt", lambda receipt_id: False)
+    assert client.delete(f"/receipts/{uuid4()}", headers=AUTH).status_code == 404
+
+
+@pytest.mark.parametrize("error", [psycopg.OperationalError("down"), requests.ConnectionError("down")])
+def test_delete_when_storage_is_down(monkeypatch, error):
+    monkeypatch.setattr(main, "delete_receipt", Mock(side_effect=error))
+    response = client.delete(f"/receipts/{RECEIPT_ID}", headers=AUTH)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Couldn't delete that receipt. Try again in a minute."
+
+
 # Chat
 
 def test_chat_returns_the_agent_answer(monkeypatch):
@@ -212,6 +313,45 @@ def test_chat_returns_the_agent_answer(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == answer.model_dump(mode="json")
+
+
+def server_sent_events(response):
+    """Parse a text/event-stream body into the JSON events it carries."""
+    return [json.loads(chunk.removeprefix("data: ")) for chunk in response.text.split("\n\n") if chunk]
+
+
+def test_chat_stream_sends_events_as_server_sent_events(monkeypatch):
+    events = [{"type": "step", "text": "Searching the web for “grants”"},
+              {"type": "answer", "answer": {"summary": "Apply.", "action_links": [], "sources": []}}]
+    monkeypatch.setattr(main, "stream_agent", lambda message: iter(events))
+
+    response = client.post("/chat/stream", headers=AUTH, json={"message": "grants?"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert server_sent_events(response) == events
+
+
+@pytest.mark.parametrize("failure, detail", MODEL_FAILURES)
+def test_model_failure_mid_stream_becomes_an_error_event(monkeypatch, failure, detail):
+    # The 200 status is already sent once streaming starts, so the failure has to travel as an event
+    def stream_agent(message):
+        yield {"type": "step", "text": "Searching the web for “grants”"}
+        failure()
+
+    monkeypatch.setattr(main, "stream_agent", stream_agent)
+    events = server_sent_events(client.post("/chat/stream", headers=AUTH, json={"message": "grants?"}))
+    assert events == [{"type": "step", "text": "Searching the web for “grants”"}, {"type": "error", "detail": detail}]
+
+
+def test_unexpected_failure_mid_stream_becomes_an_error_event(monkeypatch):
+    def stream_agent(message):
+        raise RuntimeError("bug")
+        yield  # makes this a generator
+
+    monkeypatch.setattr(main, "stream_agent", stream_agent)
+    events = server_sent_events(client.post("/chat/stream", headers=AUTH, json={"message": "grants?"}))
+    assert events == [{"type": "error", "detail": "Something went wrong. Try asking again."}]
 
 
 @pytest.mark.parametrize("failure, detail", MODEL_FAILURES)

@@ -2,7 +2,7 @@
 
 An AI agent that automates the repetitive parts of being a university student organization treasurer. It researches fundraising and conference funding, answers questions about registered student organization (RSO) policies, turns receipt photos into reimbursement-ready expense records, and fills out university funding forms. A human approves anything that gets submitted.
 
-> **Status:** In active development. A password-protected dev deployment has three working pages: receipt processing, saved receipts shown beside their photos, and a research assistant that searches the web with Firecrawl. Correcting and approving receipts is next. See the [roadmap](#roadmap).
+> **Status:** In active development. A password-protected dev deployment has three working pages: receipt processing, saved receipts (shown beside their photos, and editable or deletable), and a research assistant that searches the web with Firecrawl and streams its steps and thinking live. Receipts run on Gemini Flash-Lite, chosen with an evaluation on labeled receipts, and research runs on Gemini Flash, which follows the multi-step research process more reliably. An evaluation set of real receipts has started. Approving receipts is next. See the [roadmap](#roadmap).
 
 ## Why I'm building this
 
@@ -12,12 +12,12 @@ As a student organization treasurer, I spend a lot of time on repetitive work: r
 
 | Capability | How it works | Status |
 |---|---|---|
-| **Funding research** | Finds fundraising ideas and conference funding (travel grants, sponsorships). The agent searches with Firecrawl, opens official pages to find sign-up links, and cites only pages it actually opened | Working (dev) |
+| **Funding research** | Finds fundraising ideas and conference funding (travel grants, sponsorships). The agent searches with Firecrawl, opens official pages to find sign-up links, and cites only pages it actually opened. Code makes it open at least one page before it can answer | Working (dev) |
 | **Policy Q&A** | Answers questions about RSO funding rules using retrieval-augmented generation (RAG) over the university's policy documents | Planned |
-| **Receipt processing** | Reads receipt photos with Gemini's image understanding, checks the totals in Python, flags anything that needs review, and saves each receipt with its original photo. A saved receipts page shows each receipt's breakdown beside its photo. Correcting and approving receipts, and interpreting cryptic item codes, are next | In progress |
+| **Receipt processing** | Reads receipt photos with Gemini's image understanding, checks the totals in Python, flags anything that needs review, and saves each receipt with its original photo. A saved receipt is shown beside its photo, where I can correct any value (re-checked on save) or delete it. Approving receipts and interpreting cryptic item codes are next | In progress |
 | **Human review** | When it's unsure (an unreadable item code, a possible policy violation), the agent messages me on Telegram, waits for my answer, then continues | Planned |
 | **Form filling** | Fills out funding and reimbursement forms on Student Central with Playwright; I review and submit | Planned |
-| **Live agent view** | Streams the agent's steps and tool calls to the web app in real time | Planned |
+| **Live agent view** | Streams each research step ("Searching the web for…", "Reading…") and the model's thinking to the Ask page as they happen, then the answer | Working (dev) |
 
 ## How it works today
 
@@ -44,9 +44,9 @@ flowchart LR
 ```
 
 1. **Login:** `proxy.ts` runs before every request to the frontend and requires a username and password (HTTP Basic Auth).
-2. **Server-side calls:** the browser only talks to the app's own server. Uploads and questions go through the `/api/receipts` and `/api/chat` route handlers, and the saved receipt pages are Server Components that call the backend while rendering. The shared secret lives in `app/lib/backend.ts`, which is marked `server-only`, so importing it from browser code fails the build.
+2. **Server-side calls:** the browser only talks to the app's own server. Uploads, edits, deletes and questions go through route handlers under `/api/`, and the saved receipt pages are Server Components that call the backend while rendering. The shared secret lives in `app/lib/backend.ts`, which is marked `server-only`, so importing it from browser code fails the build.
 3. **Backend:** FastAPI rejects any request without the correct secret. `/chat` runs the agent and `/receipts` runs the receipt pipeline.
-4. **Agent:** a single LangChain agent (`create_agent`) on Gemini with two Firecrawl tools, `research_web` and `read_page`, and a Pydantic response schema (`summary`, `action_links`, `sources`).
+4. **Agent:** a single LangChain agent (`create_agent`) on Gemini with two Firecrawl tools, `research_web` and `read_page`, and a Pydantic response schema (`summary`, `action_links`, `sources`). `/chat/stream` runs it with LangChain streaming and sends Server-Sent Events: each tool call as a readable step, Gemini's thought summaries as they're written, then the citation-checked answer. The `/api/chat` route passes those events through to the page as they arrive. Middleware caps each question at 3 searches and 4 page reads, and sends the agent back once if it tries to answer before opening a page.
 5. **Receipt pipeline:** Gemini reads the photo into a Pydantic `Receipt`, Python checks the math and looks for duplicates, then the photo goes to a private bucket and the data to Postgres.
 6. **Photos:** the page asks for a receipt's photo at the app's own `/api/receipts/<id>/photo`. Each time, the backend creates a signed link that expires after a minute, and the browser is redirected to it and loads the photo straight from Supabase.
 
@@ -106,30 +106,40 @@ flowchart LR
 ### Implemented
 
 1. **Every boundary checks access.** The frontend requires a login, the backend only accepts requests carrying a shared secret (compared in constant time), and the Gemini API key exists only on the backend. Each service holds only the secrets it needs, and each environment has its own values.
-2. **The app degrades gracefully when the model is unavailable.** If the main Gemini model fails or hits its usage limit, the app retries with a second model that has its own allowance (`ModelFallbackMiddleware` for the agent, `with_fallbacks` for receipts). If both fail, the API returns a 503 that says whether the model is busy or out of quota, rather than a generic 500, and the UI shows that message.
+2. **The app degrades gracefully when the model is unavailable.** If a Gemini model fails, hits its usage limit or doesn't answer within its timeout, the next model, which has its own allowance, takes over (five models for research, two for receipts with `with_fallbacks`). Models don't retry on their own, so a busy one hands off right away instead of making me wait through backoffs, and a timeout cuts off one that hangs (one took 331 s just to return a 503). For research, LangChain's `ModelFallbackMiddleware` wasn't enough. It starts from the first model on every call, and a question makes several calls, so a hanging model cost its full timeout on each one, 286 s in total. A small replacement, `ModelChain`, moves a model that failed in the last minute to the back of the line, and the same congested question then took 80 s. If every model fails, the API returns a 503 that says whether the model is busy or out of quota, rather than a generic 500, and the UI shows that message.
 3. **Output is structured and grounded.** The agent returns a Pydantic schema, not free text. Code then removes any cited link that didn't come from a page a tool actually returned, instead of trusting the model not to invent sources.
 4. **Deploys are reproducible.** Python dependencies are pinned, changes go through pull requests, and every merge deploys automatically to its environment.
 5. **Math is done in code, not by the model.** The LLM only copies what's printed, and Python checks that the items, tax, tip and total add up. A mismatch flags the receipt for human review. Amounts use `Decimal`, because floats can't represent most cents exactly.
 6. **Receipt extraction is a pipeline, not an agent tool.** Every receipt goes through the same steps, so there's nothing for an agent to decide, and a tool couldn't receive the image anyway because tool arguments are text the model writes. Extraction has no tools, so text printed on a receipt can't trigger an action.
-7. **Unreadable beats invented.** Receipt fields can be null, because a required field pressures the model to make up a value. A null is flagged for review, while a confident guess might not be noticed.
+7. **Unreadable beats invented.** Receipt fields can be null, because a required field pressures the model to make up a value. A null is flagged for review, while a confident guess might not be noticed. Code also cleans up values copied exactly as printed: a tax flag after a price (`1.25N`) or a trailing minus (`1.00-`) is parsed, and a date that won't parse becomes null, so one odd value can't throw away a whole receipt.
 8. **Only the backend can reach stored receipts.** The photo bucket is private and the Supabase secret key exists only on the backend. Row level security with no policies also blocks the tables from Supabase's public APIs.
 9. **Duplicates are flagged, not blocked.** A receipt matching a saved store, date and total gets a warning, so one purchase can't be reimbursed twice by accident, while two real identical purchases can still be saved.
 10. **Web pages are data, not instructions.** Crawled pages can contain text written to manipulate an LLM (prompt injection). Each page reaches the model inside a `<source>` tag, with any fake tags in the page escaped, and the prompt says never to follow text inside one. `read_page` only opens URLs that appeared in a result or in my message, so a malicious page can't make the agent visit a URL with conversation data stuffed into it.
 11. **Photos are shown through links that expire.** The bucket stays private. The page never holds a photo link itself: it points at an app route that gets a fresh one-minute link on every request, so a page left open still works, and a copied Supabase link stops working almost right away.
 12. **Tests never touch real services.** Unit tests replace Gemini, Firecrawl and Supabase with fakes, and the test setup overrides every key with a fake value, so a missed fake fails instead of spending credits or writing to the real database. New backend logic starts as a failing test.
+13. **Models are chosen by measurement.** I timed every step of a receipt upload: about 90% of the wait was Gemini Flash "thinking" (about 25 s), while Flash-Lite read the same receipt in about 4 s. Flash's free tier also allows only 5 requests a minute and 20 a day, and one research question makes several calls. The switch to Flash-Lite was then checked against labeled receipts (see [Testing](#testing)), and the fallback is a different model with its own allowance. Research went the other way. On the same question, Flash-Lite answered without opening a single page, while Flash opened three official pages without being asked twice. A question makes 5 to 8 model calls and each Flash model allows 20 a day, so research uses three Flash models in turn and falls back to Flash-Lite after that.
+14. **Corrections get the same checks as new receipts.** Saving an edited receipt re-runs the math and duplicate checks (skipping the receipt itself), so a correction that doesn't add up is still flagged. Deleting removes the photo inside the database transaction, so if the photo can't be deleted the row rolls back, and no receipt is left pointing at a missing photo.
+15. **The agent shows its work.** The Ask page streams each step and Gemini's thought summaries instead of a spinner. The thoughts are summaries Google writes, not a full record of the model's reasoning, and the streamed answer goes through the same citation check as before. Seeing them is how the problem in the next decision was found: one run's thoughts said it would combine search results "with my general knowledge" after hitting its search limit, which the prompt forbids. Receipt scanning doesn't stream: it's one model call with fixed steps that takes about 4 s, so there's nothing for the treasurer to follow, and it doesn't ask for thought summaries at all.
+16. **The research process is enforced in code, not just requested.** The prompt told the agent to open official pages before answering, and Flash-Lite skipped that step. It searched four times, opened nothing, and wrote part of its answer from memory. That run, and the test runs after the fix, led to these changes:
+    - Middleware now checks before an answer goes out. If no page was opened, the agent is sent back once with a reminder. It happens only once, so the agent can't loop forever.
+    - LangChain's limit message ("Do not call 'research_web' again") read like "you're out of options", so the limits now say what to do next: open the pages already found.
+    - The prompt also gives the agent today's date. Without it, the agent described a conference from last March as "open now".
+    - The Ask page shows a step only when a tool call actually starts, so a search blocked by the limit never shows up as "Searching the web for…".
+
+    When I asked Flash-Lite the same question again, the check sent it back, it opened three pages, and every claim in its answer came from one of them. Tests run these checks through the real agent graph with a scripted model, so they show the checks are wired in, not just written.
 
 ### Planned
 
-13. **A person approves every submission.** The agent can prepare forms, but LangChain's human-in-the-loop middleware pauses before `submit_form_job`, and I make the final click on Student Central myself.
-14. **University credentials never touch the app.** Student Central uses single sign-on with multi-factor authentication. Instead of storing a password, the Playwright worker reuses a browser profile I logged into myself, and it only runs on my machine.
-15. **Actions are logged.** Every agent run is traced in LangSmith, and every expense links back to its original receipt.
-16. **Personal data is minimized.** Receipt extraction already skips names and card numbers. Real receipts stay out of this public repo, and anything else sensitive is redacted with LangChain's PII middleware before it's stored or logged.
+17. **A person approves every submission.** The agent can prepare forms, but LangChain's human-in-the-loop middleware pauses before `submit_form_job`, and I make the final click on Student Central myself.
+18. **University credentials never touch the app.** Student Central uses single sign-on with multi-factor authentication. Instead of storing a password, the Playwright worker reuses a browser profile I logged into myself, and it only runs on my machine.
+19. **Actions are logged.** Every agent run is traced in LangSmith, and every expense links back to its original receipt.
+20. **Personal data is minimized.** Receipt extraction already skips names and card numbers. Real receipts stay out of this public repo, and anything else sensitive is redacted with LangChain's PII middleware before it's stored or logged.
 
 ## Tech stack
 
 | Layer | Technology | Status |
 |---|---|---|
-| LLM | Google Gemini API: Flash-Lite 3.5, falling back to 3.1 (image input for receipts). Chosen for the free tier's limits and speed; see [gemini_models.py](backend/gemini_models.py) | In use |
+| LLM | Google Gemini API. Receipts: Flash-Lite 3.5, falling back to 3.1 (image input). Research: Flash 3.6, 3.8 and 3, then Flash-Lite. Chosen for the free tier's limits, speed, and how well each follows the research process; see [gemini_models.py](backend/gemini_models.py) | In use |
 | Agent framework | LangChain 1.x (`create_agent`, middleware), LangGraph | In use |
 | Structured output | Pydantic | In use |
 | Backend | FastAPI | In use |
@@ -158,16 +168,21 @@ flowchart LR
   - [x] Math and readability checks in Python, with unit tests
   - [x] Upload page that shrinks photos in the browser
   - [x] Evaluation tool, tested on synthetic receipts
-  - [ ] Evaluation set of real receipts
+  - [ ] Evaluation set of real receipts (3 of 15–20 labeled so far)
+  - [x] Model choice for speed and the free tier, checked with the evaluation tool
   - [x] PostgreSQL and file storage for receipts, with duplicate detection
   - [x] Saved receipts page showing each receipt beside its photo
   - [x] Unit tests for the backend: API routes, receipt pipeline, storage, agent guardrails, tools and eval scoring
-  - [ ] Review screen to correct and approve a receipt
+  - [x] Browser smoke tests with Playwright
+  - [x] Correct or delete a saved receipt, with the checks re-run on save
+  - [ ] Approve a receipt
   - [ ] Item-code interpretation
   - [ ] CSV export
 - [ ] **Phase 2: Policy RAG.** Load RSO policies into pgvector, answer questions with citations, and check expenses against policy.
 - [x] **Phase 3: Funding research.** Firecrawl research for fundraising and conference funding, with cited sources.
 - [ ] **Phase 4: Live agent view.** Stream agent steps to the UI with Server-Sent Events, and add LangSmith tracing.
+  - [x] Stream each research step and the model's thinking to the Ask page
+  - [ ] LangSmith tracing
 - [ ] **Phase 5: Human in the loop.** Telegram bot for sending receipt photos and answering the agent's questions; runs pause and resume across conversations.
 - [ ] **Phase 6: Student Central forms.** A local Playwright worker fills forms from approved jobs.
 - [ ] **Phase 7: Evaluate and harden.** Accuracy evaluations, cost and rate limits, and real user accounts if other officers use the app.
@@ -235,26 +250,36 @@ npm run test:e2e                          # browser smoke tests in Edge, desktop
 
 ## Testing
 
-Unit tests cover the backend's logic: the API routes and their error codes, receipt extraction and validation, the math checks, saving and loading receipts, the agent's citation check, the Firecrawl tools, and the eval's scoring. Evaluations are separate: they call Gemini on labeled receipts to measure accuracy.
+Unit tests cover the backend's logic: the API routes and their error codes, receipt extraction and validation, the math checks, saving, editing, deleting and loading receipts, how the agent's stream becomes steps, thoughts and a citation-checked answer, the research guardrails (tool limits and reading before answering), the Firecrawl tools, and the eval's scoring. Evaluations are separate: they call Gemini on labeled receipts to measure accuracy.
+
+**Evaluations.** Each labeled receipt is a photo plus a `.json` answer key with the same name. The eval scores every model on every receipt as correct, flagged for review, or a *silent error* (wrong, and nothing warned me), which is the outcome that matters most. Results so far, on a small set:
+
+| Set | Flash-Lite 3.5 (primary) | Flash-Lite 3.1 (fallback) |
+|---|---|---|
+| 3 synthetic receipts | All correct; the bad total was flagged | All correct; the bad total was flagged |
+| 3 real receipts (2 runs) | Misses a small-print date on a sideways photo (flagged, not silent); otherwise correct | Same miss, plus one store name that differed from the label |
+
+The first run on real receipts also found a crash: a price printed as `1.25N` failed validation and lost the whole receipt. It's fixed and has tests. One earlier run had a silent date error, so results vary from run to run, and the set needs to grow before the numbers mean much.
 
 - **No real services.** Tests replace Gemini, Firecrawl and Supabase with small fakes. [tests/conftest.py](backend/tests/conftest.py) sets every key to a fake value before the app loads, so a test that misses a fake fails instead of spending credits or writing to the real database.
 - **Test first.** New backend logic starts as a failing test that describes the behavior, then gets the code that makes it pass.
 - **Browser smoke tests:** a few Playwright tests in `frontend/e2e/` click through the pages that work without the backend (navigation, the unsupported-format pop-up, the Ask form). They use the installed Edge and log in with the values in `frontend/.env.local`, and they start `npm run dev` if it isn't running.
-- **Known gaps:** no browser test covers pages that need the backend, and SQL only runs against a fake connection in tests, so a query change still needs one manual run against Supabase.
+- **Known gaps:** no browser test covers pages that need the backend, SQL only runs against a fake connection in tests (so a query change still needs one manual run against Supabase), the real-receipt eval set is too small to separate the models with confidence, and research answers have no eval yet (the guardrails are tested, but the models were compared on a single question).
 
 ## Project structure
 
 ```
 treasurerAgent/
 ├── backend/
-│   ├── main.py              # FastAPI app: /health, /chat, /receipts, /receipts/{id}, /receipts/{id}/photo (API key required)
+│   ├── main.py              # FastAPI app: /health, /chat, /chat/stream, /receipts (upload, list),
+│   │                        #   /receipts/{id} (read, edit, delete), /receipts/{id}/photo (API key required)
 │   ├── schema.sql           # database tables
 │   ├── gemini_models.py     # which Gemini models the app uses, and why
-│   ├── agent.py             # LangChain agent: model, tools, fallback, citation check
+│   ├── agent.py             # LangChain agent: model chain, tools, research guardrails, citation check, streaming
 │   ├── tools.py             # research_web and read_page (Firecrawl)
 │   ├── receipts.py          # reads a receipt image into structured data
 │   ├── receipt_checks.py    # math and readability checks (no model, no API key)
-│   ├── receipt_store.py     # saves and loads receipts in Supabase, flags duplicates, makes photo links
+│   ├── receipt_store.py     # saves, edits, deletes and loads receipts in Supabase, flags duplicates, makes photo links
 │   ├── schemas.py           # Pydantic request and response schemas
 │   ├── tests/               # unit tests; conftest.py sets fake keys
 │   ├── pytest.ini
@@ -265,10 +290,10 @@ treasurerAgent/
 │   ├── app/page.tsx         # Process a receipt
 │   ├── app/ask/page.tsx     # Ask a question
 │   ├── app/receipts/        # saved receipts list and [id] detail (Server Components)
-│   ├── app/ui/              # upload, receipt card, chat, sidebar, pop-ups, loaders
+│   ├── app/ui/              # upload, receipt card and editor, streaming chat, sidebar, pop-ups, loaders
 │   ├── app/lib/backend.ts   # server-only calls to the backend with the API secret
 │   ├── app/lib/receipts.ts  # receipt types, money and date formatting
-│   ├── app/api/             # route handlers: forward uploads and questions, redirect to fresh photo links
+│   ├── app/api/             # route handlers: forward uploads, edits and deletes, stream answers, redirect to photos
 │   ├── e2e/                 # Playwright browser smoke tests
 │   ├── playwright.config.ts
 │   └── proxy.ts             # Basic Auth login check
@@ -276,7 +301,8 @@ treasurerAgent/
 │   └── requirements.txt     # Playwright for the planned form-filling worker (runs on my laptop)
 ├── evals/
 │   ├── run_receipts.py      # scores extraction against labeled receipts
-│   └── synthetic/           # fake receipts that are safe to commit
+│   ├── synthetic/           # fake receipts that are safe to commit
+│   └── receipts/            # real labeled receipts (gitignored: personal data)
 ├── .env.example             # backend environment variables
 ├── LEARNING.md              # build log
 └── readme.md
