@@ -18,8 +18,29 @@ export async function forwardToBackend(path: string, init: BackendRequest = {}) 
   } catch {
     return Response.json({ detail: "Couldn't reach the server. Try again in a minute." }, { status: 502 });
   }
-  return new Response(await response.text(), {
+  // A 204 (a successful delete) must have no body at all, not even an empty one
+  return new Response(response.status === 204 ? null : await response.text(), {
     status: response.status,
     headers: { "Content-Type": response.headers.get("Content-Type") ?? "text/plain" },
+  });
+}
+
+// For streamed answers: hands each backend event to the browser as it arrives, instead of
+// waiting for the whole response the way forwardToBackend does
+export async function streamFromBackend(path: string, init: BackendRequest = {}) {
+  let response: Response;
+  try {
+    response = await backendFetch(path, init);
+  } catch {
+    return Response.json({ detail: "Couldn't reach the server. Try again in a minute." }, { status: 502 });
+  }
+  if (!response.ok || !response.body) {
+    return new Response(await response.text(), {
+      status: response.status,
+      headers: { "Content-Type": response.headers.get("Content-Type") ?? "text/plain" },
+    });
+  }
+  return new Response(response.body, {
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" },
   });
 }

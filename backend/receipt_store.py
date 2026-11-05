@@ -31,7 +31,8 @@ def _upload_image(path: str, image: bytes, mime_type: str) -> None:
 
 
 def _delete_image(path: str) -> None:
-    requests.delete(f"{BUCKET_URL}/{path}", headers=STORAGE_HEADERS, timeout=30).raise_for_status()
+    # The bulk endpoint, because it treats an already-missing file as deleted where the single one errors
+    requests.delete(BUCKET_URL, json={"prefixes": [path]}, headers=STORAGE_HEADERS, timeout=30).raise_for_status()
 
 
 def _signed_image_url(path: str) -> str:
@@ -42,10 +43,11 @@ def _signed_image_url(path: str) -> str:
     return f"{STORAGE_URL}{response.json()['signedURL']}"
 
 
-def duplicate_issues(receipt: Receipt) -> list[str]:
+def duplicate_issues(receipt: Receipt, ignore_id: UUID | None = None) -> list[str]:
     """Flag a receipt matching a saved one, so one purchase can't be reimbursed twice.
 
-    This warns instead of blocking, because two identical purchases on one day can be real."""
+    This warns instead of blocking, because two identical purchases on one day can be real.
+    ignore_id skips the receipt being edited, which would otherwise match itself."""
     if not receipt.merchant or receipt.purchase_date is None or receipt.total is None:
         return []
 
@@ -53,8 +55,9 @@ def duplicate_issues(receipt: Receipt) -> list[str]:
         match = conn.execute(
             """select 1 from receipts
                where lower(merchant) = lower(%s) and purchase_date = %s and total = %s
+                 and id is distinct from %s
                limit 1""",
-            (receipt.merchant, receipt.purchase_date, receipt.total),
+            (receipt.merchant, receipt.purchase_date, receipt.total, ignore_id),
         ).fetchone()
 
     if match is None:
@@ -78,17 +81,52 @@ def save_receipt(receipt: Receipt, issues: list[str], image: bytes, mime_type: s
                 (receipt_id, receipt.merchant, receipt.purchase_date, receipt.subtotal,
                  receipt.tax, receipt.tip, receipt.total, issues, image_path),
             )
-            conn.cursor().executemany(
-                """insert into line_items (receipt_id, position, raw_text, item_code, quantity, unit_price, line_total)
-                   values (%s, %s, %s, %s, %s, %s, %s)""",
-                [(receipt_id, position, item.raw_text, item.item_code, item.quantity, item.unit_price, item.line_total)
-                 for position, item in enumerate(receipt.items)],
-            )
+            _insert_items(conn, receipt_id, receipt)
     except psycopg.Error:
         _delete_image(image_path)  # the bucket and database can't share a transaction
         raise
 
     return receipt_id
+
+
+def _insert_items(conn: psycopg.Connection, receipt_id: UUID, receipt: Receipt) -> None:
+    conn.cursor().executemany(
+        """insert into line_items (receipt_id, position, raw_text, item_code, quantity, unit_price, line_total)
+           values (%s, %s, %s, %s, %s, %s, %s)""",
+        [(receipt_id, position, item.raw_text, item.item_code, item.quantity, item.unit_price, item.line_total)
+         for position, item in enumerate(receipt.items)],
+    )
+
+
+def update_receipt(receipt_id: UUID, receipt: Receipt, issues: list[str]) -> bool:
+    """Replace a receipt's values and line items with corrected ones. False if it doesn't exist."""
+    # One transaction, so a failure partway through can't leave a receipt with half its items
+    with psycopg.connect(DATABASE_URL) as conn:
+        updated = conn.execute(
+            """update receipts set merchant = %s, purchase_date = %s, subtotal = %s, tax = %s, tip = %s,
+                                   total = %s, issues = %s
+               where id = %s returning id""",
+            (receipt.merchant, receipt.purchase_date, receipt.subtotal, receipt.tax, receipt.tip,
+             receipt.total, issues, receipt_id),
+        ).fetchone()
+        if updated is None:
+            return False
+        # Replacing every item is simpler than working out which ones changed, moved or were removed
+        conn.execute("delete from line_items where receipt_id = %s", (receipt_id,))
+        _insert_items(conn, receipt_id, receipt)
+    return True
+
+
+def delete_receipt(receipt_id: UUID) -> bool:
+    """Delete a receipt, its line items and its photo. False if it doesn't exist."""
+    with psycopg.connect(DATABASE_URL) as conn:
+        deleted = conn.execute("delete from receipts where id = %s returning image_path", (receipt_id,)).fetchone()
+        if deleted is None:
+            return False
+        # Inside the transaction: if the photo can't be deleted, the row rolls back too, instead
+        # of leaving a receipt that points at a missing photo
+        _delete_image(deleted[0])
+    return True
 
 
 def list_receipts() -> list[ReceiptSummary]:
